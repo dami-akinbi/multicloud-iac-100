@@ -1,0 +1,42 @@
+name: "Remote Container Build (GCP Cloud Build & Azure ACR)"
+description: "Builds and pushes container images remotely without a local Docker daemon"
+
+inputs:
+  cloud:
+    description: "Target cloud provider: gcp or azure"
+    required: true
+  context_path:
+    description: "Path to application build context containing Dockerfile"
+    required: true
+  gcp_image_uri:
+    description: "Full Artifact Registry image URI (required when cloud=gcp)"
+    required: false
+    default: ""
+  azure_acr_name:
+    description: "Azure Container Registry name (required when cloud=azure)"
+    required: false
+    default: ""
+  azure_image_tag:
+    description: "Image name and tag inside ACR, e.g. url-shortener:latest (required when cloud=azure)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build and push container image via Google Cloud Build
+      if: inputs.cloud == 'gcp'
+      shell: bash
+      run: |
+        gcloud builds submit \
+          --tag "${{ inputs.gcp_image_uri }}" \
+          "${{ inputs.context_path }}"
+
+    - name: Build and push container image via Azure Container Registry
+      if: inputs.cloud == 'azure'
+      shell: bash
+      run: |
+        az acr build \
+          --registry "${{ inputs.azure_acr_name }}" \
+          --image "${{ inputs.azure_image_tag }}" \
+          "${{ inputs.context_path }}"
