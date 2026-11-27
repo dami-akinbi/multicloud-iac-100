@@ -1,0 +1,268 @@
+name: "PR Terraform Validation & Plan"
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  detect-changes:
+    name: "Detect Changed Projects"
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.filter.outputs.projects }}
+      has_projects: ${{ steps.filter.outputs.has_projects }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identify modified project folders
+        id: filter
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          PROJECTS=$(git diff --name-only "origin/${{ github.base_ref }}" HEAD \
+            | grep '^projects/' \
+            | cut -d'/' -f2 \
+            | sort -u \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+
+          echo "Detected projects: $PROJECTS"
+          echo "projects=$PROJECTS" >> "$GITHUB_OUTPUT"
+
+          if [ "$PROJECTS" = "[]" ]; then
+            echo "has_projects=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_projects=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate-gcp:
+    name: "GCP Plan (${{ matrix.project }})"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_projects == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect-changes.outputs.projects) }}
+    defaults:
+      run:
+        working-directory: projects/${{ matrix.project }}/infra/gcp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check if GCP directory exists
+        id: check_dir
+        working-directory: .
+        run: |
+          if [ -d "projects/${{ matrix.project }}/infra/gcp" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to GCP via OIDC
+        if: steps.check_dir.outputs.exists == 'true'
+        uses: ./.github/actions/cloud-auth
+        with:
+          enable_gcp: "true"
+          enable_azure: "false"
+          gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        if: steps.check_dir.outputs.exists == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform Format Check
+        if: steps.check_dir.outputs.exists == 'true'
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        if: steps.check_dir.outputs.exists == 'true'
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        if: steps.check_dir.outputs.exists == 'true'
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        if: steps.check_dir.outputs.exists == 'true'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color 2>&1 | tee plan.txt
+
+      - name: Post GCP Plan Comment on PR
+        if: steps.check_dir.outputs.exists == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const project = '${{ matrix.project }}';
+            const outcome = '${{ steps.plan.outcome }}';
+            const marker = `<!-- tf-plan-comment:${project}:gcp -->`;
+            let planOutput = fs.readFileSync(`projects/${project}/infra/gcp/plan.txt`, 'utf8');
+            if (planOutput.length > 55000) {
+              planOutput = planOutput.slice(0, 55000) + '\n... [truncated]';
+            }
+            const statusIcon = outcome === 'success' ? '✅' : '❌';
+            const body = [
+              marker,
+              `### ${statusIcon} GCP Terraform Plan — \`${project}\``,
+              '',
+              '<details><summary>Show Plan Output</summary>',
+              '',
+              '```hcl',
+              planOutput,
+              '```',
+              '</details>'
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+            if (outcome !== 'success') {
+              core.setFailed('GCP Terraform plan failed.');
+            }
+
+  validate-azure:
+    name: "Azure Plan (${{ matrix.project }})"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_projects == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect-changes.outputs.projects) }}
+    defaults:
+      run:
+        working-directory: projects/${{ matrix.project }}/infra/azure
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check if Azure directory exists
+        id: check_dir
+        working-directory: .
+        run: |
+          if [ -d "projects/${{ matrix.project }}/infra/azure" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to Azure via OIDC
+        if: steps.check_dir.outputs.exists == 'true'
+        uses: ./.github/actions/cloud-auth
+        with:
+          enable_gcp: "false"
+          enable_azure: "true"
+          azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        if: steps.check_dir.outputs.exists == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform Format Check
+        if: steps.check_dir.outputs.exists == 'true'
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        if: steps.check_dir.outputs.exists == 'true'
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        if: steps.check_dir.outputs.exists == 'true'
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        if: steps.check_dir.outputs.exists == 'true'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color 2>&1 | tee plan.txt
+
+      - name: Post Azure Plan Comment on PR
+        if: steps.check_dir.outputs.exists == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const project = '${{ matrix.project }}';
+            const outcome = '${{ steps.plan.outcome }}';
+            const marker = `<!-- tf-plan-comment:${project}:azure -->`;
+            let planOutput = fs.readFileSync(`projects/${project}/infra/azure/plan.txt`, 'utf8');
+            if (planOutput.length > 55000) {
+              planOutput = planOutput.slice(0, 55000) + '\n... [truncated]';
+            }
+            const statusIcon = outcome === 'success' ? '✅' : '❌';
+            const body = [
+              marker,
+              `### ${statusIcon} Azure Terraform Plan — \`${project}\``,
+              '',
+              '<details><summary>Show Plan Output</summary>',
+              '',
+              '```hcl',
+              planOutput,
+              '```',
+              '</details>'
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+            if (outcome !== 'success') {
+              core.setFailed('Azure Terraform plan failed.');
+            }
