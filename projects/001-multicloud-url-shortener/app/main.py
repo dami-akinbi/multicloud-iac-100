@@ -16,6 +16,7 @@ logger = logging.getLogger("url-shortener")
 
 CLOUD_PROVIDER = os.getenv("CLOUD_PROVIDER", "local").lower()
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "damis-project-01")
+FIRESTORE_DATABASE = os.getenv("FIRESTORE_DATABASE", "(default)")
 FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "short_links")
 BIGQUERY_DATASET = os.getenv("BIGQUERY_DATASET", "url_analytics")
 BIGQUERY_TABLE = os.getenv("BIGQUERY_TABLE", "click_events")
@@ -45,7 +46,7 @@ def get_firestore_client():
     global _firestore_client
     if _firestore_client is None:
         from google.cloud import firestore
-        _firestore_client = firestore.Client(project=GCP_PROJECT_ID)
+        _firestore_client = firestore.Client(project=GCP_PROJECT_ID, database=FIRESTORE_DATABASE)
     return _firestore_client
 
 

@@ -17,7 +17,7 @@ variable "app_name" {
 }
 
 variable "image_uri" {
-  description = "Container image URI built in Artifact Registry"
+  description = "Container image URI built in Artifact Registry (falls back to public hello image during PR plans)"
   type        = string
   default     = ""
 }
