@@ -35,7 +35,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Lazy-initialized cloud clients and local fallback store
 _memory_store: Dict[str, Dict[str, Any]] = {}
 _firestore_client = None
 _bigquery_client = None
@@ -95,32 +94,40 @@ def _generate_code(length: int = 6) -> str:
 
 
 def _get_link(code: str) -> Optional[Dict[str, Any]]:
-    if CLOUD_PROVIDER == "gcp":
-        doc = get_firestore_client().collection(FIRESTORE_COLLECTION).document(code).get()
-        return doc.to_dict() if doc.exists else None
+    try:
+        if CLOUD_PROVIDER == "gcp":
+            doc = get_firestore_client().collection(FIRESTORE_COLLECTION).document(code).get()
+            return doc.to_dict() if doc.exists else None
 
-    if CLOUD_PROVIDER == "azure":
-        from azure.cosmos.exceptions import CosmosResourceNotFoundError
-        try:
-            return get_cosmos_container().read_item(item=code, partition_key=code)
-        except CosmosResourceNotFoundError:
-            return None
+        if CLOUD_PROVIDER == "azure":
+            from azure.cosmos.exceptions import CosmosResourceNotFoundError
+            try:
+                return get_cosmos_container().read_item(item=code, partition_key=code)
+            except CosmosResourceNotFoundError:
+                return None
 
-    return _memory_store.get(code)
+        return _memory_store.get(code)
+    except Exception as exc:
+        logger.exception("Storage read failure for code=%s on cloud=%s", code, CLOUD_PROVIDER)
+        raise HTTPException(status_code=502, detail=f"Storage read error ({CLOUD_PROVIDER}): {exc}")
 
 
 def _save_link(record: Dict[str, Any]) -> None:
     code = record["code"]
-    if CLOUD_PROVIDER == "gcp":
-        get_firestore_client().collection(FIRESTORE_COLLECTION).document(code).set(record)
-        return
+    try:
+        if CLOUD_PROVIDER == "gcp":
+            get_firestore_client().collection(FIRESTORE_COLLECTION).document(code).set(record)
+            return
 
-    if CLOUD_PROVIDER == "azure":
-        cosmos_doc = {**record, "id": code}
-        get_cosmos_container().create_item(body=cosmos_doc)
-        return
+        if CLOUD_PROVIDER == "azure":
+            cosmos_doc = {**record, "id": code}
+            get_cosmos_container().create_item(body=cosmos_doc)
+            return
 
-    _memory_store[code] = record
+        _memory_store[code] = record
+    except Exception as exc:
+        logger.exception("Storage write failure for code=%s on cloud=%s", code, CLOUD_PROVIDER)
+        raise HTTPException(status_code=502, detail=f"Storage write error ({CLOUD_PROVIDER}): {exc}")
 
 
 def _record_click(code: str, record: Dict[str, Any], event: Dict[str, Any]) -> None:
@@ -129,31 +136,33 @@ def _record_click(code: str, record: Dict[str, Any], event: Dict[str, Any]) -> N
     recent_events.append(event)
     recent_events = recent_events[-25:]
 
-    # Emit structured edge telemetry (ingested natively by Cloud Logging & Azure Log Analytics)
     logger.info(json.dumps({"event_type": "edge_click", **event}))
 
-    if CLOUD_PROVIDER == "gcp":
-        get_firestore_client().collection(FIRESTORE_COLLECTION).document(code).update(
-            {"clicks": updated_clicks, "recent_events": recent_events}
-        )
-        table_ref = f"{GCP_PROJECT_ID}.{BIGQUERY_DATASET}.{BIGQUERY_TABLE}"
-        errors = get_bigquery_client().insert_rows_json(table_ref, [event])
-        if errors:
-            logger.warning(json.dumps({"warning": "bigquery_insert_errors", "details": errors}))
-        return
+    try:
+        if CLOUD_PROVIDER == "gcp":
+            get_firestore_client().collection(FIRESTORE_COLLECTION).document(code).update(
+                {"clicks": updated_clicks, "recent_events": recent_events}
+            )
+            table_ref = f"{GCP_PROJECT_ID}.{BIGQUERY_DATASET}.{BIGQUERY_TABLE}"
+            errors = get_bigquery_client().insert_rows_json(table_ref, [event])
+            if errors:
+                logger.warning(json.dumps({"warning": "bigquery_insert_errors", "details": errors}))
+            return
 
-    if CLOUD_PROVIDER == "azure":
-        cosmos_doc = {
-            **record,
-            "id": code,
-            "clicks": updated_clicks,
-            "recent_events": recent_events,
-        }
-        get_cosmos_container().upsert_item(body=cosmos_doc)
-        return
+        if CLOUD_PROVIDER == "azure":
+            cosmos_doc = {
+                **record,
+                "id": code,
+                "clicks": updated_clicks,
+                "recent_events": recent_events,
+            }
+            get_cosmos_container().upsert_item(body=cosmos_doc)
+            return
 
-    record["clicks"] = updated_clicks
-    record["recent_events"] = recent_events
+        record["clicks"] = updated_clicks
+        record["recent_events"] = recent_events
+    except Exception as exc:
+        logger.exception("Telemetry update failed for code=%s on cloud=%s: %s", code, CLOUD_PROVIDER, exc)
 
 
 @app.get("/")
