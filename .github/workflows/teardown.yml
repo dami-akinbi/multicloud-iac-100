@@ -1,0 +1,125 @@
+name: "Teardown Project Infrastructure (FinOps)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: "Project folder inside projects/ (e.g., 001-multicloud-url-shortener)"
+        required: true
+        default: "001-multicloud-url-shortener"
+        type: string
+      cloud_target:
+        description: "Target cloud to tear down"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - gcp
+          - azure
+      run_smoke_test:
+        description: "Verify live endpoint health before destroying resources"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  teardown-gcp:
+    name: "Teardown GCP (${{ inputs.project_name }})"
+    if: inputs.cloud_target == 'both' || inputs.cloud_target == 'gcp'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/${{ inputs.project_name }}/infra/gcp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via OIDC
+        uses: ./.github/actions/cloud-auth
+        with:
+          enable_gcp: "true"
+          enable_azure: "false"
+          gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Pre-Teardown Health Check
+        if: inputs.run_smoke_test == true
+        run: |
+          SERVICE_URL=$(terraform output -raw service_url 2>/dev/null || echo "")
+          if [ -n "$SERVICE_URL" ]; then
+            echo "Running pre-teardown health check against $SERVICE_URL"
+            curl -fsS "${SERVICE_URL}/health" || true
+          fi
+
+      - name: Destroy GCP Infrastructure
+        run: terraform destroy -input=false -auto-approve
+
+  teardown-azure:
+    name: "Teardown Azure (${{ inputs.project_name }})"
+    if: inputs.cloud_target == 'both' || inputs.cloud_target == 'azure'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/${{ inputs.project_name }}/infra/azure
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Azure via OIDC
+        uses: ./.github/actions/cloud-auth
+        with:
+          enable_gcp: "false"
+          enable_azure: "true"
+          azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Pre-Teardown Health Check & Capture Resource Group
+        id: inspect
+        run: |
+          RG_NAME=$(terraform output -raw resource_group_name 2>/dev/null || echo "rg-url-shortener-001")
+          echo "rg_name=${RG_NAME}" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ inputs.run_smoke_test }}" = "true" ]; then
+            SERVICE_URL=$(terraform output -raw service_url 2>/dev/null || echo "")
+            if [ -n "$SERVICE_URL" ]; then
+              echo "Running pre-teardown health check against $SERVICE_URL"
+              curl -fsS "${SERVICE_URL}/health" || true
+            fi
+          fi
+
+      - name: Destroy Azure Infrastructure
+        run: terraform destroy -input=false -auto-approve
+
+      - name: Fallback Resource Group Cleanup
+        if: always()
+        env:
+          RG_NAME: ${{ steps.inspect.outputs.rg_name }}
+        run: |
+          if [ "$(az group exists --name "$RG_NAME")" = "true" ]; then
+            echo "Deleting lingering resource group $RG_NAME..."
+            az group delete --name "$RG_NAME" --yes --no-wait
+          else
+            echo "Resource group $RG_NAME already removed."
+          fi

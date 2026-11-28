@@ -1,0 +1,208 @@
+name: "Deploy Project Live (GCP & Azure)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: "Project folder inside projects/ (e.g., 001-multicloud-url-shortener)"
+        required: true
+        default: "001-multicloud-url-shortener"
+        type: string
+      cloud_target:
+        description: "Target cloud to spin up"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - gcp
+          - azure
+      run_smoke_test:
+        description: "Run automated end-to-end smoke test after deployment"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-gcp:
+    name: "Deploy GCP (${{ inputs.project_name }})"
+    if: inputs.cloud_target == 'both' || inputs.cloud_target == 'gcp'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/${{ inputs.project_name }}/infra/gcp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via OIDC
+        uses: ./.github/actions/cloud-auth
+        with:
+          enable_gcp: "true"
+          enable_azure: "false"
+          gcp_workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp_service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Bootstrap Artifact Registry
+        id: bootstrap
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve -target=google_artifact_registry_repository.repo
+          REPO_URI=$(terraform output -raw artifact_registry_repo)
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "image_uri=${REPO_URI}/url-shortener:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Remote Build via Google Cloud Build
+        uses: ./.github/actions/remote-build
+        with:
+          cloud: "gcp"
+          context_path: projects/${{ inputs.project_name }}/app
+          gcp_image_uri: ${{ steps.bootstrap.outputs.image_uri }}
+
+      - name: Apply Full GCP Infrastructure
+        id: deploy
+        run: |
+          terraform apply -input=false -auto-approve -var="image_uri=${{ steps.bootstrap.outputs.image_uri }}"
+          SERVICE_URL=$(terraform output -raw service_url)
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Live GCP Smoke Test
+        if: inputs.run_smoke_test == true
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          SLUG: demo-${{ github.run_number }}
+        run: |
+          echo "Waiting for Cloud Run endpoint: ${SERVICE_URL}"
+          for i in $(seq 1 12); do
+            if curl -fsS "${SERVICE_URL}/health" > /dev/null; then
+              break
+            fi
+            sleep 5
+          done
+
+          curl -fsS "${SERVICE_URL}/health" | jq .
+
+          curl -fsS -X POST "${SERVICE_URL}/shorten" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"https://github.com/dami-akinbi/multicloud-iac-100\", \"custom_code\": \"${SLUG}\"}" | jq .
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${SERVICE_URL}/${SLUG}")
+          echo "Redirect HTTP Status: ${STATUS}"
+          [ "${STATUS}" = "302" ]
+
+          curl -fsS "${SERVICE_URL}/stats/${SLUG}" | jq .
+
+      - name: Publish GCP Live Demo Summary
+        if: always()
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          SLUG: demo-${{ github.run_number }}
+        run: |
+          {
+            echo "### GCP Live Deployment — \`${{ inputs.project_name }}\`"
+            echo "- **Live Base URL:** ${SERVICE_URL}"
+            echo "- **Interactive Swagger Docs:** ${SERVICE_URL}/docs"
+            echo "- **Health Check:** ${SERVICE_URL}/health"
+            echo "- **Sample Short Link:** ${SERVICE_URL}/${SLUG}"
+            echo "- **Sample Click Stats:** ${SERVICE_URL}/stats/${SLUG}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-azure:
+    name: "Deploy Azure (${{ inputs.project_name }})"
+    if: inputs.cloud_target == 'both' || inputs.cloud_target == 'azure'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/${{ inputs.project_name }}/infra/azure
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Azure via OIDC
+        uses: ./.github/actions/cloud-auth
+        with:
+          enable_gcp: "false"
+          enable_azure: "true"
+          azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Bootstrap Azure Container Registry
+        id: bootstrap
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve -target=azurerm_container_registry.acr
+          ACR_NAME=$(terraform output -raw acr_name)
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "acr_name=${ACR_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=url-shortener:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Remote Build via Azure Container Registry
+        uses: ./.github/actions/remote-build
+        with:
+          cloud: "azure"
+          context_path: projects/${{ inputs.project_name }}/app
+          azure_acr_name: ${{ steps.bootstrap.outputs.acr_name }}
+          azure_image_tag: ${{ steps.bootstrap.outputs.image_tag }}
+
+      - name: Apply Full Azure Infrastructure
+        id: deploy
+        run: |
+          terraform apply -input=false -auto-approve -var="image_tag=${{ steps.bootstrap.outputs.image_tag }}"
+          SERVICE_URL=$(terraform output -raw service_url)
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Live Azure Smoke Test
+        if: inputs.run_smoke_test == true
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          SLUG: demo-${{ github.run_number }}
+        run: |
+          echo "Waiting for Azure Container App endpoint: ${SERVICE_URL}"
+          for i in $(seq 1 18); do
+            if curl -fsS "${SERVICE_URL}/health" > /dev/null; then
+              break
+            fi
+            sleep 5
+          done
+
+          curl -fsS "${SERVICE_URL}/health" | jq .
+
+          curl -fsS -X POST "${SERVICE_URL}/shorten" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"https://github.com/dami-akinbi/multicloud-iac-100\", \"custom_code\": \"${SLUG}\"}" | jq .
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${SERVICE_URL}/${SLUG}")
+          echo "Redirect HTTP Status: ${STATUS}"
+          [ "${STATUS}" = "302" ]
+
+          curl -fsS "${SERVICE_URL}/stats/${SLUG}" | jq .
+
+      - name: Publish Azure Live Demo Summary
+        if: always()
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          SLUG: demo-${{ github.run_number }}
+        run: |
+          {
+            echo "### Azure Live Deployment — \`${{ inputs.project_name }}\`"
+            echo "- **Live Base URL:** ${SERVICE_URL}"
+            echo "- **Interactive Swagger Docs:** ${SERVICE_URL}/docs"
+            echo "- **Health Check:** ${SERVICE_URL}/health"
+            echo "- **Sample Short Link:** ${SERVICE_URL}/${SLUG}"
+            echo "- **Sample Click Stats:** ${SERVICE_URL}/stats/${SLUG}"
+          } >> "$GITHUB_STEP_SUMMARY"
