@@ -1,4 +1,4 @@
-# Multi-Cloud Infrastructure-as-Code Portfolio (`multicloud-iac-100`)
+## Multi-Cloud Infrastructure-as-Code Portfolio (`multicloud-iac-100`)
 
 A 100-project, flat-monorepo engineering portfolio demonstrating **Google Cloud Platform (GCP)** and **Microsoft Azure** architectural parity using **Terraform**, **Python**, **GitHub Actions CI/CD**, and **keyless OIDC authentication**.
 
