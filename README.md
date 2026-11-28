@@ -16,7 +16,7 @@ A 100-project, flat-monorepo engineering portfolio demonstrating **Google Cloud 
 ### Tier 1: Simple & Serverless Foundations
 | # | Project | GCP Stack | Azure Stack | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **001** | [URL Shortener & Edge Analytics](./projects/001-multicloud-url-shortener) | Cloud Run + Firestore + BigQuery | Container Apps + Cosmos DB + Log Analytics | In Progress |
+| **001** | [URL Shortener & Edge Analytics](./projects/001-multicloud-url-shortener) | Cloud Run + Firestore + BigQuery | Container Apps + Cosmos DB + Log Analytics | Ready (Live Demo) |
 | **002** | Event-Driven Webhook Processor | Cloud Run + Pub/Sub + Firestore | Container Apps + Service Bus + Cosmos DB | Planned |
 | **003** | Automated Media & PDF Pipeline | Cloud Storage + Eventarc + Cloud Run Jobs | Blob Storage + Event Grid + Container Apps Jobs | Planned |
 | **004** | Ephemeral PR Preview Environments | Cloud Run Revisions + Artifact Registry + Cloud Build | Container Apps Revisions + ACR (`az acr build`) | Planned |
