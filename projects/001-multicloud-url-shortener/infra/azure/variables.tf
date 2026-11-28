@@ -11,13 +11,13 @@ variable "resource_group_name" {
 }
 
 variable "app_name" {
-  description = "Base name for Project 001 Azure resources"
+  description = "Alphanumeric base name for Project 001 Azure resources"
   type        = string
   default     = "urlshortener001"
 }
 
 variable "image_tag" {
-  description = "Container image tag built in Azure Container Registry"
+  description = "Image repository and tag inside ACR, e.g. url-shortener:latest (falls back to public quickstart image during PR plans)"
   type        = string
   default     = ""
 }
